@@ -21,17 +21,21 @@
 
 namespace ufmt {
 
-using string = std::string;
-using string_view = std::string_view;
+using string_t = std::string;
+using string_view_t = std::string_view;
 
 } // namespace ufmt
 #endif
+
+/* Forward declarations */
+namespace ufmt { struct format_desc; }
+namespace ufmt::detail { struct wrapper; }
 
 namespace ufmt {
 
 struct format_desc
 {
-	string_view format;
+	string_view_t format;
 	int base = 10;
 	int precision = 0;
 	size_t width = 0;
@@ -39,26 +43,28 @@ struct format_desc
 	bool floating_point = false;
 	char sign = '-';
 	char fill = ' ';
-	char type = 'g';
+	char type = 0;
 
 	enum class alignment
 	{
 		none,
 		left,
 		right,
-		center,
-		numeric,
+		center
 	};
 
 	alignment align = alignment::none;
 
-	format_desc() = default;
-	format_desc( string_view argFormat );
+	static format_desc parse(
+	    string_view_t argFormat,
+	    const detail::wrapper *const args,
+	    size_t numArgs,
+	    size_t argIndex );
 };
 
 template <typename T> struct formatter
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
 		return "?";
 	}
@@ -68,7 +74,7 @@ template <typename T> struct formatter
 
 template <typename T> struct formatter<T &>
 {
-	static string to_string( const void *arg, const format_desc &fd ) { return formatter<T>::to_string( arg, fd ); }
+	static string_t to_string( const void *arg, const format_desc &fd ) { return formatter<T>::to_string( arg, fd ); }
 	static int to_int( const void *arg ) { return formatter<T>::to_int( arg ); }
 };
 
@@ -81,7 +87,7 @@ static constexpr size_t StackBufferLength = 80;
 inline bool is_digit( char ch ) { return ch >= '0' && ch <= '9'; }
 inline bool is_upper( char ch ) { return ch >= 'A' && ch <= 'Z'; }
 
-using formatter_func = string( * )( const void *arg, const format_desc &fd );
+using formatter_func = string_t( * )( const void *arg, const format_desc &fd );
 
 struct wrapper
 {
@@ -89,14 +95,14 @@ struct wrapper
 	formatter_func func = nullptr;
 };
 
-string format_wrapped_args( const char *f, const detail::wrapper *const args, size_t numArgs );
+string_t format_wrapped_args( const char *f, const detail::wrapper *const args, size_t numArgs );
 
 } // namespace detail
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename... Args>
-string format( const char *f, Args &&... args )
+string_t format( const char *f, Args &&... args )
 {
 	if constexpr ( sizeof...( Args ) != 0 )
 	{
@@ -122,13 +128,13 @@ enum class numeric_type
 
 template <typename T, numeric_type Type> struct numeric_formatter
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
 		auto value = *reinterpret_cast<const T *>( arg );
 
 		if constexpr ( Type == numeric_type::floating_point )
 		{
-			if ( strchr( "bBdoxXn", fd.type ) )
+			if ( fd.type && strchr( "bBdoxXn", fd.type ) )
 			{
 				auto valueInt64 = int64_t( value );
 				return numeric_formatter<int64_t, numeric_type::signed_integer>::to_string( &valueInt64, fd );
@@ -136,7 +142,7 @@ template <typename T, numeric_type Type> struct numeric_formatter
 		}
 		else
 		{
-			if ( strchr( "aAeEfF", fd.type ) )
+			if ( fd.type && strchr( "aAeEfF", fd.type ) )
 			{
 				auto valueDouble = double( value );
 				return numeric_formatter<double, numeric_type::floating_point>::to_string( &valueDouble, fd );
@@ -153,8 +159,11 @@ template <typename T, numeric_type Type> struct numeric_formatter
 		}
 		else if ( value < 0 && ( fd.base != 10 || Type == numeric_type::floating_point ) )
 		{
-			*prefixCursor++ = '-';
-			value = -value;
+			if constexpr ( Type != numeric_type::unsigned_integer )
+			{
+				*prefixCursor++ = '-';
+				value = -value;
+			}
 		}
 
 		char prefixChar = 0;
@@ -223,9 +232,9 @@ template <typename T, numeric_type Type> struct numeric_formatter
 
 		if ( auto len = strlen( buff ); len < fd.width )
 		{
-			string result = string( buff, prefixCursor - buff );
+			string_t result = string_t( buff, prefixCursor - buff );
 
-			result += string( fd.width - len, '0' );
+			result += string_t( fd.width - len, '0' );
 
 			result += prefixCursor;
 			return result;
@@ -241,13 +250,13 @@ template <typename T, numeric_type Type> struct numeric_formatter
 };
 
 //---------------------------------------------------------------------------------------------------------------------
-inline string format_wrapped_args( const char *f, const detail::wrapper *const args, size_t numArgs )
+inline string_t format_wrapped_args( const char *f, const detail::wrapper *const args, size_t numArgs )
 {
 	// Early out
 	if ( f == nullptr || *f == 0 )
-		return string();
+		return string_t();
 
-	string result = "";
+	string_t result = "";
 
 	char argBuff[StackBufferLength];
 	size_t argLength = 0;
@@ -289,14 +298,14 @@ inline string format_wrapped_args( const char *f, const detail::wrapper *const a
 
 				if ( argIndex < numArgs )
 				{
-					format_desc fd( argFormat );
+					format_desc fd = format_desc::parse( argFormat, args, numArgs, argIndex );
 					auto argStr = args[argIndex].func( args[argIndex].ptr, fd );
 
 					if ( argStr.size() < fd.width )
 					{
 						if ( fd.align == format_desc::alignment::left || fd.align == format_desc::alignment::right )
 						{
-							string padding = string( fd.width - argStr.size(), fd.fill );
+							string_t padding = string_t( fd.width - argStr.size(), fd.fill );
 
 							if ( fd.align == format_desc::alignment::left )
 								argStr += padding;
@@ -305,12 +314,12 @@ inline string format_wrapped_args( const char *f, const detail::wrapper *const a
 						}
 						else if ( fd.align == format_desc::alignment::center )
 						{
-							string padding = string( ( fd.width - argStr.size() ) / 2, fd.fill );
+							string_t padding = string_t( ( fd.width - argStr.size() ) / 2, fd.fill );
 
 							argStr = padding + argStr + padding;
 
 							if ( argStr.size() < fd.width )
-								argStr += string( &fd.fill, 1 );
+								argStr += string_t( &fd.fill, 1 );
 						}
 					}
 
@@ -346,7 +355,7 @@ inline string format_wrapped_args( const char *f, const detail::wrapper *const a
 		}
 
 		if ( append )
-			result += string( &ch, 1 );
+			result += string_t( &ch, 1 );
 
 		prevCh = ch;
 	}
@@ -373,7 +382,7 @@ template <> struct formatter<double> : detail::numeric_formatter<double, detail:
 
 template <> struct formatter<bool>
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
 		auto value = *reinterpret_cast<const bool *>( arg );
 		return value ? "true" : "false";
@@ -384,7 +393,7 @@ template <> struct formatter<bool>
 
 template <> struct formatter<float>
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
 		double value = *reinterpret_cast<const float *>( arg );
 		return formatter<double>::to_string( &value, fd );
@@ -395,10 +404,16 @@ template <> struct formatter<float>
 
 template <> struct formatter<char>
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
 		char value = *reinterpret_cast<const char *>( arg );
-		return string( &value, 1 );
+
+		if ( fd.type && strchr( "bBdnoxX", fd.type ) )
+		{
+			return detail::numeric_formatter<char, detail::numeric_type::signed_integer>::to_string( &value, fd );
+		}
+
+		return string_t( &value, 1 );
 	}
 
 	static int to_int( const void *arg ) { return 0; }
@@ -406,7 +421,7 @@ template <> struct formatter<char>
 
 template <> struct formatter<const char *>
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
 		const char *value = *reinterpret_cast<const char *const *>( arg );
 		return value ? value : "nullptr";
@@ -417,7 +432,7 @@ template <> struct formatter<const char *>
 
 template <size_t N> struct formatter<const char ( & )[N]>
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
 		const char *value = *reinterpret_cast<const char *( & )[N]>( arg );
 		return value;
@@ -426,40 +441,71 @@ template <size_t N> struct formatter<const char ( & )[N]>
 	static int to_int( const void *arg ) { return 0; }
 };
 
-template <> struct formatter<string>
+template <> struct formatter<string_t>
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
-		return *reinterpret_cast<const string *>( arg );
+		return *reinterpret_cast<const string_t *>( arg );
 	}
 
 	static int to_int( const void *arg ) { return 0; }
 };
 
-template <> struct formatter<string_view>
+template <> struct formatter<string_view_t>
 {
-	static string to_string( const void *arg, const format_desc &fd )
+	static string_t to_string( const void *arg, const format_desc &fd )
 	{
-		return string( *reinterpret_cast<const string_view *>( arg ) );
+		return string_t( *reinterpret_cast<const string_view_t *>( arg ) );
+	}
+
+	static int to_int( const void *arg ) { return 0; }
+};
+
+template <typename T> struct formatter<T *>
+{
+	static string_t to_string( const void *arg, const format_desc &fd )
+	{
+		format_desc fdPtr = fd;
+		if ( fdPtr.type == 0 || fdPtr.type == 'p' )
+		{
+			fdPtr.prefix = true;
+			fdPtr.type = 'x';
+			fdPtr.base = 16;
+		}
+		else if ( fdPtr.type == 'P' )
+		{
+			fdPtr.prefix = true;
+			fdPtr.type = 'X';
+			fdPtr.base = 16;
+		}
+
+		auto value = *reinterpret_cast<const size_t *>( arg );
+		return detail::numeric_formatter<size_t, detail::numeric_type::unsigned_integer>::to_string( &value, fdPtr );
 	}
 
 	static int to_int( const void *arg ) { return 0; }
 };
 
 //---------------------------------------------------------------------------------------------------------------------
-inline format_desc::format_desc( string_view argFormat )
-	: format( argFormat )
+inline format_desc format_desc::parse(
+    string_view_t argFormat,
+    const detail::wrapper *const args,
+    size_t numArgs,
+    size_t argIndex )
 {
+	format_desc result;
+	result.format = argFormat;
+
 	size_t numCharsLeft = argFormat.size();
 	if ( !numCharsLeft )
-		return;
+		return result;
 
 	const auto *chars = argFormat.data();
 
 	// Fill character
 	if ( numCharsLeft >= 2 && ( *chars ) != '{' && ( *chars ) != '}' && strchr( "<>=^", chars[1] ) )
 	{
-		fill = *chars++;
+		result.fill = *chars++;
 		--numCharsLeft;
 	}
 
@@ -467,13 +513,11 @@ inline format_desc::format_desc( string_view argFormat )
 	if ( auto *alignChar = strchr( "<>^=", *chars ); numCharsLeft && alignChar )
 	{
 		if ( *alignChar == '<' )
-			align = alignment::left;
+			result.align = alignment::left;
 		else if ( *alignChar == '>' )
-			align = alignment::right;
+			result.align = alignment::right;
 		else if ( *alignChar == '^' )
-			align = alignment::center;
-		else if ( *alignChar == '=' )
-			align = alignment::numeric;
+			result.align = alignment::center;
 
 		++chars;
 		--numCharsLeft;
@@ -482,14 +526,14 @@ inline format_desc::format_desc( string_view argFormat )
 	// Sign
 	if ( auto *signChar = strchr( "+- ", *chars ); numCharsLeft && signChar )
 	{
-		sign = *chars++;
+		result.sign = *chars++;
 		--numCharsLeft;
 	}
 
 	// Type prefix
 	if ( numCharsLeft && *chars == '#' )
 	{
-		prefix = true;
+		result.prefix = true;
 		++chars;
 		--numCharsLeft;
 	}
@@ -497,8 +541,7 @@ inline format_desc::format_desc( string_view argFormat )
 	// Sign-aware zero-padding for numeric types
 	if ( numCharsLeft && *chars == '0' )
 	{
-		align = alignment::numeric;
-		fill = '0';
+		result.fill = '0';
 
 		++chars;
 		--numCharsLeft;
@@ -516,12 +559,8 @@ inline format_desc::format_desc( string_view argFormat )
 			--numCharsLeft;
 		}
 
-		auto widthI = atoi( buff );
-
-		if ( widthI >= 0 )
-			width = size_t( widthI );
-		else
-			width = 0;
+		if ( auto widthI = atoi( buff ); widthI >= 0 )
+			result.width = size_t( widthI );
 	}
 
 	// Precision
@@ -539,27 +578,27 @@ inline format_desc::format_desc( string_view argFormat )
 			--numCharsLeft;
 		}
 
-		precision = atoi( buff );
-
-		if ( precision < 0 )
-			precision = 0;
+		if ( ( result.precision = atoi( buff ) ) < 0 )
+			result.precision = 0;
 	}
 
 	// Type
 	if ( numCharsLeft && strchr( "bBdnoxXaAceEfFgGps", *chars ) )
 	{
-		type = *chars;
+		result.type = *chars;
 
-		if ( type == 'b' || type == 'B' )
-			base = 2;
-		else if ( type == 'o' )
-			base = 8;
-		else if ( type == 'x' || type == 'X' )
-			base = 16;
+		if ( result.type == 'b' || result.type == 'B' )
+			result.base = 2;
+		else if ( result.type == 'o' )
+			result.base = 8;
+		else if ( result.type == 'x' || result.type == 'X' )
+			result.base = 16;
 
 		++chars;
 		--numCharsLeft;
 	}
+
+	return result;
 }
 
 } // namespace ufmt
