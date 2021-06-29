@@ -1,2 +1,2 @@
-# ufmt
+# µfmt
 Minimalist {fmt} implementation
