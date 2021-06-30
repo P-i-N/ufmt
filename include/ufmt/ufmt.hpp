@@ -62,6 +62,37 @@ struct format_desc
 	    size_t argIndex );
 };
 
+struct output_wrapper
+{
+	virtual bool append( const char *str, size_t length ) = 0;
+
+	bool append( const char *str ) { return append( str, str ? strlen( str ) : 0 ); }
+
+	virtual bool insert( size_t pos, const char *str, size_t length ) = 0;
+
+	bool insert( size_t pos, const char *str ) { return insert( pos, str, str ? strlen( str ) : 0 ); }
+};
+
+#if !defined(UFMT_DO_NOT_USE_STL)
+struct string_output : output_wrapper
+{
+	string_t output;
+
+	bool append( const char *str, size_t length ) override
+	{
+		output += string_t( str, length );
+		return true;
+	}
+
+	bool insert( size_t pos, const char *str, size_t length ) override
+	{
+
+
+		return true;
+	}
+};
+#endif
+
 template <typename T> struct formatter
 {
 	static string_t to_string( const void *arg, const format_desc &fd )
@@ -170,7 +201,7 @@ template <typename T, numeric_type Type> struct numeric_formatter
 
 		if constexpr ( Type == numeric_type::floating_point )
 		{
-
+			// TBD
 		}
 		else
 		{
@@ -217,6 +248,16 @@ template <typename T, numeric_type Type> struct numeric_formatter
 				fmtBuff[2] = 0;
 
 				UFMT_SPRINTF( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), fmtBuff, value );
+			}
+
+			if ( ( fd.type == 'a' || fd.type == 'A' ) && !fd.prefix )
+			{
+				auto *c = prefixCursor;
+				while ( c[1] )
+				{
+					*c = c[2];
+					++c;
+				}
 			}
 		}
 
