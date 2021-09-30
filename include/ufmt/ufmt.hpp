@@ -2,48 +2,23 @@
 
 #include <string.h>
 
-#if !defined(UFMT_NOEXCEPT)
-	#define UFMT_NOEXCEPT noexcept
-#endif
-
-#if !defined(UFMT_SPRINTF)
-	#if defined(_MSC_VER)
-		#define UFMT_SPRINTF sprintf_s
-	#else
-		#define UFMT_SPRINTF sprintf
-	#endif
-#endif
-
-#if !defined(UFMT_DO_NOT_USE_STL)
-
-#include <string>
-#include <string_view>
-
-namespace ufmt {
-
-using string_t = std::string;
-using string_view_t = std::string_view;
-
-} // namespace ufmt
-#endif
-
 /* Forward declarations */
-namespace ufmt { struct format_desc; }
 namespace ufmt::detail { struct wrapper; }
+
+#include "ufmt_writer.hpp"
 
 namespace ufmt {
 
 struct format_desc
 {
-	string_view_t format;
 	int base = 10;
 	int precision = 0;
 	size_t width = 0;
 	bool prefix = false;
 	bool floating_point = false;
-	char sign = '-';
-	char fill = ' ';
-	char type = 0;
+	int sign = '-';
+	int fill = ' ';
+	int type = 0;
 
 	enum class alignment
 	{
@@ -55,94 +30,144 @@ struct format_desc
 
 	alignment align = alignment::none;
 
+	template <typename C>
 	static format_desc parse(
-	    string_view_t argFormat,
-	    const detail::wrapper *const args,
+	    const C *valuePtrFormatStr,
+	    const detail::wrapper *const argPtrs,
 	    size_t numArgs,
-	    size_t argIndex );
+	    size_t valuePtrIndex );
 };
 
-struct output_wrapper
+template <typename W, typename T> struct formatter
 {
-	virtual bool append( const char *str, size_t length ) = 0;
-
-	bool append( const char *str ) { return append( str, str ? strlen( str ) : 0 ); }
-
-	virtual bool insert( size_t pos, const char *str, size_t length ) = 0;
-
-	bool insert( size_t pos, const char *str ) { return insert( pos, str, str ? strlen( str ) : 0 ); }
-};
-
-#if !defined(UFMT_DO_NOT_USE_STL)
-struct string_output : output_wrapper
-{
-	string_t output;
-
-	bool append( const char *str, size_t length ) override
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		output += string_t( str, length );
-		return true;
-	}
+		W &w = *reinterpret_cast<W *>( writerPtr );
 
-	bool insert( size_t pos, const char *str, size_t length ) override
-	{
-
-
-		return true;
+		const auto &value = *reinterpret_cast<const T *>( valuePtr );
+		return w.append( data( value ), length( value ) );
 	}
 };
-#endif
 
-template <typename T> struct formatter
+template <typename W, typename T> struct formatter<W, T &>
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		return "?";
+		return formatter<W, T>::write( writerPtr, valuePtr, fd );
 	}
-
-	static int to_int( const void *arg ) { return 0; }
-};
-
-template <typename T> struct formatter<T &>
-{
-	static string_t to_string( const void *arg, const format_desc &fd ) { return formatter<T>::to_string( arg, fd ); }
-	static int to_int( const void *arg ) { return formatter<T>::to_int( arg ); }
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace detail {
 
-static constexpr size_t StackBufferLength = 80;
-
-inline bool is_digit( char ch ) { return ch >= '0' && ch <= '9'; }
-inline bool is_upper( char ch ) { return ch >= 'A' && ch <= 'Z'; }
-
-using formatter_func = string_t( * )( const void *arg, const format_desc &fd );
+using formatter_write_func = bool( * )( void *writerPtr, const void *valuePtr, const format_desc &fd );
 
 struct wrapper
 {
 	const void *ptr = nullptr;
-	formatter_func func = nullptr;
+	formatter_write_func writeFunc = nullptr;
 };
 
-string_t format_wrapped_args( const char *f, const detail::wrapper *const args, size_t numArgs );
+template <typename W, typename C>
+size_t format_wrapped_args_to(
+    W &w,
+    const C *formatStr,
+    size_t formatStrLen,
+    const detail::wrapper *const argPtrs,
+    size_t numArgs );
+
+template <bool ZT, typename O, typename C, size_t N, typename... Args>
+size_t format_to_( O &output, const C( &formatStr )[N], Args &&... argPtrs )
+{
+	detail::writer<O> w = { output };
+	const detail::wrapper wrappedArgs[] { { &argPtrs, formatter<decltype( w ), Args>::write }..., { } };
+	auto numChars = detail::format_wrapped_args_to( w, formatStr, N - 1, wrappedArgs, sizeof...( Args ) );
+	if constexpr ( ZT ) { w.zero_terminate(); }
+	return numChars;
+}
+
+template <bool ZT, typename O, typename T, typename... Args>
+size_t format_to_( O &output, T formatStr, Args &&... argPtrs )
+{
+	detail::writer<O> w = { output };
+	const detail::wrapper wrappedArgs[] { { &argPtrs, formatter<decltype( w ), Args>::write }..., { } };
+	auto numChars = detail::format_wrapped_args_to( w, data( formatStr ), length( formatStr ), wrappedArgs, sizeof...( Args ) );
+	if constexpr ( ZT ) { w.zero_terminate(); }
+	return numChars;
+}
+
+template <bool ZT, typename C, typename T, typename... Args>
+size_t format_to_n_( C *output, size_t outputLen, T formatStr, Args &&... argPtrs )
+{
+	detail::buffer_writer<C> w( output, outputLen );
+	const detail::wrapper wrappedArgs[] { { &argPtrs, formatter<decltype( w ), Args>::write }..., { } };
+	auto numChars = detail::format_wrapped_args_to( w, data( formatStr ), length( formatStr ), wrappedArgs, sizeof...( Args ) );
+	if constexpr ( ZT ) { w.zero_terminate(); }
+	return numChars;
+}
 
 } // namespace detail
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename... Args>
-string_t format( const char *f, Args &&... args )
+template <typename O, typename C, size_t N, typename... Args>
+size_t format_to( O &output, const C ( &formatStr )[N], Args &&... argPtrs )
 {
-	if constexpr ( sizeof...( Args ) != 0 )
-	{
-		const detail::wrapper wrappedArgs[] = { { &args, formatter<Args>::to_string }... };
-		return detail::format_wrapped_args( f, wrappedArgs, sizeof...( Args ) );
-	}
-
-	return detail::format_wrapped_args( f, nullptr, 0 );
+	return detail::format_to_<false>( output, formatStr, argPtrs... );
 }
+
+template <typename O, typename T, typename... Args>
+size_t format_to( O &output, T formatStr, Args &&... argPtrs )
+{
+	return detail::format_to_<false>( output, formatStr, argPtrs... );
+}
+
+template <typename C, typename T, typename... Args>
+size_t format_to_n( C *output, size_t outputLen, T formatStr, Args &&... argPtrs )
+{
+	return detail::format_to_n_<false>( output, outputLen, formatStr, argPtrs... );
+}
+
+template <typename O, typename C, size_t N, typename... Args>
+size_t format_to0( O &output, const C( &formatStr )[N], Args &&... argPtrs )
+{
+	return detail::format_to_<true>( output, formatStr, argPtrs... );
+}
+
+template <typename O, typename T, typename... Args>
+size_t format_to0( O &output, T formatStr, Args &&... argPtrs )
+{
+	return detail::format_to_<true>( output, formatStr, argPtrs... );
+}
+
+template <typename C, typename T, typename... Args>
+size_t format_to_n0( C *output, size_t outputLen, T formatStr, Args &&... argPtrs )
+{
+	return detail::format_to_n_<true>( output, outputLen, formatStr, argPtrs... );
+}
+
+#if !defined(UFMT_DO_NOT_USE_STL)
+template <typename C, typename... Args>
+std::basic_string<C> format( std::basic_string_view<C> formatStr, Args &&... argPtrs )
+{
+	std::basic_string<C> result;
+	format_to( result, formatStr, argPtrs... );
+	return result;
+}
+
+template <typename... Args>
+std::string format( std::string_view formatStr, Args &&... argPtrs )
+{
+	return format<char>( formatStr, argPtrs... );
+}
+
+template <typename... Args>
+std::wstring format( std::wstring_view formatStr, Args &&... argPtrs )
+{
+	return format<wchar_t>( formatStr, argPtrs... );
+}
+#endif
 
 } // namespace ufmt
 
@@ -157,26 +182,28 @@ enum class numeric_type
 	floating_point
 };
 
-template <typename T, numeric_type Type> struct numeric_formatter
+template <typename W, typename T, numeric_type Type> struct numeric_formatter
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		auto value = *reinterpret_cast<const T *>( arg );
+		W &w = *reinterpret_cast<W *>( writerPtr );
+
+		auto value = *reinterpret_cast<const T *>( valuePtr );
 
 		if constexpr ( Type == numeric_type::floating_point )
 		{
-			if ( fd.type && strchr( "bBdoxXn", fd.type ) )
+			if ( fd.type && detail::find_char( "bBdoxXn", fd.type ) )
 			{
 				auto valueInt64 = int64_t( value );
-				return numeric_formatter<int64_t, numeric_type::signed_integer>::to_string( &valueInt64, fd );
+				return numeric_formatter<W, int64_t, numeric_type::signed_integer>::write( writerPtr, &valueInt64, fd );
 			}
 		}
 		else
 		{
-			if ( fd.type && strchr( "aAeEfF", fd.type ) )
+			if ( fd.type && detail::find_char( "aAeEfF", fd.type ) )
 			{
 				auto valueDouble = double( value );
-				return numeric_formatter<double, numeric_type::floating_point>::to_string( &valueDouble, fd );
+				return numeric_formatter<W, double, numeric_type::floating_point>::write( writerPtr, &valueDouble, fd );
 			}
 		}
 
@@ -218,16 +245,32 @@ template <typename T, numeric_type Type> struct numeric_formatter
 		if constexpr ( Type == numeric_type::signed_integer )
 		{
 			if constexpr ( sizeof( T ) <= 4 )
+#if defined(_MSC_VER)
 				_itoa( int( value ), prefixCursor, fd.base );
+#else
+				snprintf( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), "%" PRIi32, int32_t( value ) );
+#endif
 			else if constexpr ( sizeof( T ) == 8 )
+#if defined(_MSC_VER)
 				_i64toa( int64_t( value ), prefixCursor, fd.base );
+#else
+				snprintf( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), "%" PRIi64, int64_t( value ) );
+#endif
 		}
 		else if constexpr ( Type == numeric_type::unsigned_integer )
 		{
 			if constexpr ( sizeof( T ) <= 4 )
+#if defined(_MSC_VER)
 				_ultoa( uint( value ), prefixCursor, fd.base );
+#else
+				snprintf( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), "%" PRIu32, uint32_t( value ) );
+#endif
 			else if constexpr ( sizeof( T ) == 8 )
+#if defined(_MSC_VER)
 				_ui64toa( uint64_t( value ), prefixCursor, fd.base );
+#else
+				snprintf( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), "%" PRIu64, uint64_t( value ) );
+#endif
 		}
 		else if constexpr ( Type == numeric_type::floating_point )
 		{
@@ -240,14 +283,14 @@ template <typename T, numeric_type Type> struct numeric_formatter
 				fmtBuff[3] = fd.type;
 				fmtBuff[4] = 0;
 
-				UFMT_SPRINTF( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), fmtBuff, fd.precision, value );
+				snprintf( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), fmtBuff, fd.precision, value );
 			}
 			else
 			{
 				fmtBuff[1] = fd.type;
 				fmtBuff[2] = 0;
 
-				UFMT_SPRINTF( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), fmtBuff, value );
+				snprintf( prefixCursor, detail::StackBufferLength - ( prefixCursor - buff ), fmtBuff, value );
 			}
 
 			if ( ( fd.type == 'a' || fd.type == 'A' ) && !fd.prefix )
@@ -271,105 +314,99 @@ template <typename T, numeric_type Type> struct numeric_formatter
 			}
 		}
 
-		if ( auto len = strlen( buff ); len < fd.width )
+		if ( auto len = length( buff ); len < fd.width )
 		{
-			string_t result = string_t( buff, prefixCursor - buff );
-
-			result += string_t( fd.width - len, '0' );
-
-			result += prefixCursor;
-			return result;
+			w.append( buff, prefixCursor - buff );
+			w.append( "0", 1, fd.width - len );
+			return w.append( prefixCursor );
 		}
 
-		return buff;
-	}
-
-	static int to_int( const void *arg )
-	{
-		return int( *reinterpret_cast<const T *>( arg ) );
+		return w.append( buff );
 	}
 };
 
 //---------------------------------------------------------------------------------------------------------------------
-inline string_t format_wrapped_args( const char *f, const detail::wrapper *const args, size_t numArgs )
+template <typename W, typename C>
+inline size_t format_wrapped_args_to(
+    W &w,
+    const C *formatStr,
+    size_t formatStrLen,
+    const detail::wrapper *const argPtrs,
+    size_t numArgs )
 {
 	// Early out
-	if ( f == nullptr || *f == 0 )
-		return string_t();
+	if ( formatStr == nullptr || *formatStr == 0 )
+		return 0;
 
-	string_t result = "";
-
-	char argBuff[StackBufferLength];
-	size_t argLength = 0;
-	size_t argIndex = 0;
+	C valuePtrBuff[StackBufferLength] = { };
+	size_t valuePtrLength = 0;
+	size_t valuePtrIndex = 0;
 
 	bool parsingFormat = false;
-	char prevCh = 0;
+	C prevCh = 0;
 
-	while ( *f )
+	while ( formatStrLen-- )
 	{
-		auto ch = *f++;
+		auto ch = *formatStr++;
 		bool append = !parsingFormat;
 
 		if ( parsingFormat )
 		{
-			if ( ch == '}' )
+			if ( ch == C( '}' ) )
 			{
 				parsingFormat = false;
 				prevCh = 0;
 				append = false;
-				argBuff[argLength] = 0;
+				valuePtrBuff[valuePtrLength] = 0;
 
-				auto *argFormat = argBuff;
+				auto *valuePtrFormat = valuePtrBuff;
 
-				if ( argLength )
+				if ( valuePtrLength )
 				{
-					for ( size_t i = 0; i < argLength && ( *argFormat ) != ':'; ++i )
-						++argFormat;
+					for ( size_t i = 0; i < valuePtrLength && ( *valuePtrFormat ) != C( ':' ); ++i )
+						++valuePtrFormat;
 
-					if ( argFormat < argBuff + argLength )
+					if ( valuePtrFormat < valuePtrBuff + valuePtrLength )
 					{
-						*argFormat = 0;
-						++argFormat;
+						*valuePtrFormat = 0;
+						++valuePtrFormat;
 					}
 
-					if ( detail::is_digit( argBuff[0] ) )
-						argIndex = atoi( argBuff );
+					if ( detail::is_digit( valuePtrBuff[0] ) )
+						valuePtrIndex = detail::string_to_int( valuePtrBuff );
 				}
 
-				if ( argIndex < numArgs )
+				if ( valuePtrIndex < numArgs )
 				{
-					format_desc fd = format_desc::parse( argFormat, args, numArgs, argIndex );
-					auto argStr = args[argIndex].func( args[argIndex].ptr, fd );
+					format_desc fd = format_desc::parse( valuePtrFormat, argPtrs, numArgs, valuePtrIndex );
 
-					if ( argStr.size() < fd.width )
+					auto prevLen = w.length();
+					argPtrs[valuePtrIndex].writeFunc( &w, argPtrs[valuePtrIndex].ptr, fd );
+
+					if ( auto len = w.length() - prevLen; len < fd.width )
 					{
-						if ( fd.align == format_desc::alignment::left || fd.align == format_desc::alignment::right )
-						{
-							string_t padding = string_t( fd.width - argStr.size(), fd.fill );
+						auto padLen = fd.width - len;
 
-							if ( fd.align == format_desc::alignment::left )
-								argStr += padding;
-							else
-								argStr = padding + argStr;
-						}
+						if ( fd.align == format_desc::alignment::left )
+							w.append( &fd.fill, 1, padLen );
+						else if ( fd.align == format_desc::alignment::right )
+							w.insert( prevLen, &fd.fill, 1, padLen );
 						else if ( fd.align == format_desc::alignment::center )
 						{
-							string_t padding = string_t( ( fd.width - argStr.size() ) / 2, fd.fill );
+							padLen /= 2;
 
-							argStr = padding + argStr + padding;
+							w.insert( prevLen, &fd.fill, 1, padLen );
+							w.append( &fd.fill, 1, padLen );
 
-							if ( argStr.size() < fd.width )
-								argStr += string_t( &fd.fill, 1 );
+							if ( len + 2 * padLen < fd.width )
+								w.append( &fd.fill, 1 );
 						}
 					}
-
-					result += argStr;
 				}
 
-				++argIndex;
+				++valuePtrIndex;
 			}
-			else if ( ch == '{' )
+			else if ( ch == C( '{' ) )
 			{
 				parsingFormat = false;
 				prevCh = 0;
@@ -377,31 +414,31 @@ inline string_t format_wrapped_args( const char *f, const detail::wrapper *const
 			}
 			else
 			{
-				if ( argLength < StackBufferLength - 1 )
-					argBuff[argLength++] = ch;
+				if ( valuePtrLength < StackBufferLength - 1 )
+					valuePtrBuff[valuePtrLength++] = ch;
 			}
 		}
 		else
 		{
-			if ( ch == '{' )
+			if ( ch == C( '{' ) )
 			{
 				parsingFormat = true;
 				prevCh = 0;
 				append = false;
 
-				argLength = 0;
+				valuePtrLength = 0;
 			}
-			else if ( ch == '}' )
-				append = ( prevCh == '}' );
+			else if ( ch == C( '}' ) )
+				append = ( prevCh == C( '}' ) );
 		}
 
 		if ( append )
-			result += string_t( &ch, 1 );
+			w.append( &ch, 1 );
 
 		prevCh = ch;
 	}
 
-	return result;
+	return w.length();
 }
 
 } // namespace ufmt::detail
@@ -410,101 +447,76 @@ inline string_t format_wrapped_args( const char *f, const detail::wrapper *const
 
 namespace ufmt {
 
-template <> struct formatter<int16_t> : detail::numeric_formatter<int16_t, detail::numeric_type::signed_integer> { };
-template <> struct formatter<int32_t> : detail::numeric_formatter<int32_t, detail::numeric_type::signed_integer> { };
-template <> struct formatter<int64_t> : detail::numeric_formatter<int64_t, detail::numeric_type::signed_integer> { };
+template <typename W> struct formatter<W, int16_t> : detail::numeric_formatter<W, int16_t, detail::numeric_type::signed_integer> { };
+template <typename W> struct formatter<W, int32_t> : detail::numeric_formatter<W, int32_t, detail::numeric_type::signed_integer> { };
+template <typename W> struct formatter<W, int64_t> : detail::numeric_formatter<W, int64_t, detail::numeric_type::signed_integer> { };
 
-template <> struct formatter<uint8_t > : detail::numeric_formatter<uint8_t,  detail::numeric_type::unsigned_integer> { };
-template <> struct formatter<uint16_t> : detail::numeric_formatter<uint16_t, detail::numeric_type::unsigned_integer> { };
-template <> struct formatter<uint32_t> : detail::numeric_formatter<uint32_t, detail::numeric_type::unsigned_integer> { };
-template <> struct formatter<uint64_t> : detail::numeric_formatter<uint64_t, detail::numeric_type::unsigned_integer> { };
+template <typename W> struct formatter<W, uint8_t > : detail::numeric_formatter<W, uint8_t,  detail::numeric_type::unsigned_integer> { };
+template <typename W> struct formatter<W, uint16_t> : detail::numeric_formatter<W, uint16_t, detail::numeric_type::unsigned_integer> { };
+template <typename W> struct formatter<W, uint32_t> : detail::numeric_formatter<W, uint32_t, detail::numeric_type::unsigned_integer> { };
+template <typename W> struct formatter<W, uint64_t> : detail::numeric_formatter<W, uint64_t, detail::numeric_type::unsigned_integer> { };
 
-template <> struct formatter<double> : detail::numeric_formatter<double, detail::numeric_type::floating_point> { };
+template <typename W> struct formatter<W, double> : detail::numeric_formatter<W, double, detail::numeric_type::floating_point> { };
 
-template <> struct formatter<bool>
+template <typename W> struct formatter<W, bool>
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		auto value = *reinterpret_cast<const bool *>( arg );
-		return value ? "true" : "false";
-	}
+		W &w = *reinterpret_cast<W *>( writerPtr );
+		auto value = *reinterpret_cast<const bool *>( valuePtr );
 
-	static int to_int( const void *arg ) { return 0; }
+		return w.append( value ? "true" : "false" );
+	}
 };
 
-template <> struct formatter<float>
+template <typename W> struct formatter<W, float>
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		double value = *reinterpret_cast<const float *>( arg );
-		return formatter<double>::to_string( &value, fd );
+		double value = *reinterpret_cast<const float *>( valuePtr );
+		return formatter<W, double>::write( writerPtr, &value, fd );
 	}
-
-	static int to_int( const void *arg ) { return 0; }
 };
 
-template <> struct formatter<char>
+template <typename W> struct formatter<W, char>
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		char value = *reinterpret_cast<const char *>( arg );
+		char value = *reinterpret_cast<const char *>( valuePtr );
 
-		if ( fd.type && strchr( "bBdnoxX", fd.type ) )
+		if ( fd.type && detail::find_char( "bBdnoxX", fd.type ) )
 		{
-			return detail::numeric_formatter<char, detail::numeric_type::signed_integer>::to_string( &value, fd );
+			return detail::numeric_formatter<W, char, detail::numeric_type::signed_integer>::write( writerPtr, &value, fd );
 		}
 
-		return string_t( &value, 1 );
+		W &w = *reinterpret_cast<W *>( writerPtr );
+		return w.append( &value, 1 );
 	}
-
-	static int to_int( const void *arg ) { return 0; }
 };
 
-template <> struct formatter<const char *>
+template <typename W> struct formatter<W, const char *>
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		const char *value = *reinterpret_cast<const char *const *>( arg );
-		return value ? value : "nullptr";
-	}
+		const char *value = *reinterpret_cast<const char *const *>( valuePtr );
 
-	static int to_int( const void *arg ) { return 0; }
+		W &w = *reinterpret_cast<W *>( writerPtr );
+		return w.append( value ? value : "nullptr" );
+	}
 };
 
-template <size_t N> struct formatter<const char ( & )[N]>
+template <typename W, size_t N> struct formatter<W, const char ( & )[N]>
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
-		const char *value = *reinterpret_cast<const char *( & )[N]>( arg );
-		return value;
+		W &w = *reinterpret_cast<W *>( writerPtr );
+		return w.append( *reinterpret_cast<const char *( & )[N]>( valuePtr ), N - 1 );
 	}
-
-	static int to_int( const void *arg ) { return 0; }
 };
 
-template <> struct formatter<string_t>
+template <typename W, typename T> struct formatter<W, T *>
 {
-	static string_t to_string( const void *arg, const format_desc &fd )
-	{
-		return *reinterpret_cast<const string_t *>( arg );
-	}
-
-	static int to_int( const void *arg ) { return 0; }
-};
-
-template <> struct formatter<string_view_t>
-{
-	static string_t to_string( const void *arg, const format_desc &fd )
-	{
-		return string_t( *reinterpret_cast<const string_view_t *>( arg ) );
-	}
-
-	static int to_int( const void *arg ) { return 0; }
-};
-
-template <typename T> struct formatter<T *>
-{
-	static string_t to_string( const void *arg, const format_desc &fd )
+	static bool write( void *writerPtr, const void *valuePtr, const format_desc &fd )
 	{
 		format_desc fdPtr = fd;
 		if ( fdPtr.type == 0 || fdPtr.type == 'p' )
@@ -520,44 +532,42 @@ template <typename T> struct formatter<T *>
 			fdPtr.base = 16;
 		}
 
-		auto value = *reinterpret_cast<const size_t *>( arg );
-		return detail::numeric_formatter<size_t, detail::numeric_type::unsigned_integer>::to_string( &value, fdPtr );
+		auto value = *reinterpret_cast<const size_t *>( valuePtr );
+		return detail::numeric_formatter<W, size_t, detail::numeric_type::unsigned_integer>::write( writerPtr, &value, fdPtr );
 	}
-
-	static int to_int( const void *arg ) { return 0; }
 };
 
 //---------------------------------------------------------------------------------------------------------------------
+template <typename C>
 inline format_desc format_desc::parse(
-    string_view_t argFormat,
-    const detail::wrapper *const args,
+    const C *valuePtrFormatStr,
+    const detail::wrapper *const argPtrs,
     size_t numArgs,
-    size_t argIndex )
+    size_t valuePtrIndex )
 {
 	format_desc result;
-	result.format = argFormat;
 
-	size_t numCharsLeft = argFormat.size();
+	size_t numCharsLeft = length( valuePtrFormatStr );
 	if ( !numCharsLeft )
 		return result;
 
-	const auto *chars = argFormat.data();
+	const auto *chars = valuePtrFormatStr;
 
 	// Fill character
-	if ( numCharsLeft >= 2 && ( *chars ) != '{' && ( *chars ) != '}' && strchr( "<>=^", chars[1] ) )
+	if ( numCharsLeft >= 2 && ( *chars ) != '{' && ( *chars ) != '}' && detail::find_char( "<>=^", chars[1] ) )
 	{
 		result.fill = *chars++;
 		--numCharsLeft;
 	}
 
 	// Alignment
-	if ( auto *alignChar = strchr( "<>^=", *chars ); numCharsLeft && alignChar )
+	if ( auto alignChar = detail::find_char( "<>^=", *chars ); numCharsLeft && alignChar )
 	{
-		if ( *alignChar == '<' )
+		if ( alignChar == '<' )
 			result.align = alignment::left;
-		else if ( *alignChar == '>' )
+		else if ( alignChar == '>' )
 			result.align = alignment::right;
-		else if ( *alignChar == '^' )
+		else if ( alignChar == '^' )
 			result.align = alignment::center;
 
 		++chars;
@@ -565,7 +575,7 @@ inline format_desc format_desc::parse(
 	}
 
 	// Sign
-	if ( auto *signChar = strchr( "+- ", *chars ); numCharsLeft && signChar )
+	if ( numCharsLeft && detail::find_char( "+- ", *chars ) )
 	{
 		result.sign = *chars++;
 		--numCharsLeft;
@@ -590,19 +600,7 @@ inline format_desc format_desc::parse(
 
 	// Alignment width
 	if ( numCharsLeft && detail::is_digit( *chars ) )
-	{
-		char buff[detail::StackBufferLength] = { };
-		size_t buffLength = 0;
-
-		while ( numCharsLeft && detail::is_digit( *chars ) && buffLength < detail::StackBufferLength - 1 )
-		{
-			buff[buffLength++] = *chars++;
-			--numCharsLeft;
-		}
-
-		if ( auto widthI = atoi( buff ); widthI >= 0 )
-			result.width = size_t( widthI );
-	}
+		result.width = detail::string_to_uint( chars, numCharsLeft );
 
 	// Precision
 	if ( numCharsLeft >= 2 && *chars == '.' && detail::is_digit( chars[1] ) )
@@ -610,21 +608,11 @@ inline format_desc format_desc::parse(
 		++chars;
 		--numCharsLeft;
 
-		char buff[detail::StackBufferLength] = { };
-		size_t buffLength = 0;
-
-		while ( numCharsLeft && detail::is_digit( *chars ) && buffLength < detail::StackBufferLength - 1 )
-		{
-			buff[buffLength++] = *chars++;
-			--numCharsLeft;
-		}
-
-		if ( ( result.precision = atoi( buff ) ) < 0 )
-			result.precision = 0;
+		result.precision = detail::string_to_uint( chars, numCharsLeft );
 	}
 
 	// Type
-	if ( numCharsLeft && strchr( "bBdnoxXaAceEfFgGps", *chars ) )
+	if ( numCharsLeft && detail::find_char( "bBdnoxXaAceEfFgGps", *chars ) )
 	{
 		result.type = *chars;
 
