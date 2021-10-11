@@ -86,9 +86,9 @@ namespace ufmt::detail {
 
 static constexpr size_t StackBufferLength = 80;
 
-template <typename C> inline bool is_digit( C ch ) UFMT_NOEXCEPT { return unsigned( ch - C( '0' ) ) <= 9; }
-template <typename C> inline bool is_upper( C ch ) UFMT_NOEXCEPT { return ch >= C( 'A' ) && ch <= C( 'Z' ); }
-template <typename C> inline bool is_space( C ch ) UFMT_NOEXCEPT { return ch > 0 && ch <= 32; }
+template <typename C> constexpr bool is_digit( C ch ) UFMT_NOEXCEPT { return unsigned( ch - C( '0' ) ) <= 9; }
+template <typename C> constexpr bool is_upper( C ch ) UFMT_NOEXCEPT { return ch >= C( 'A' ) && ch <= C( 'Z' ); }
+template <typename C> constexpr bool is_space( C ch ) UFMT_NOEXCEPT { return ch > 0 && ch <= 32; }
 
 //---------------------------------------------------------------------------------------------------------------------
 template <typename C> inline C find_char( const char *chars, C ch ) UFMT_NOEXCEPT
